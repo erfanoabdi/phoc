@@ -19,6 +19,7 @@
 #include <wlr/types/wlr_tablet_v2.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/util/log.h>
+#include <wlr/version.h>
 #include "cursor.h"
 #include "keyboard.h"
 #include "seat.h"
@@ -1200,7 +1201,11 @@ void roots_seat_configure_xcursor(struct roots_seat *seat) {
 	struct roots_output *output;
 	wl_list_for_each(output, &server->desktop->outputs, link) {
 		float scale = output->wlr_output->scale;
+#if (WLR_VERSION_MAJOR > 0 || WLR_VERSION_MINOR > 10)
+		if (!wlr_xcursor_manager_load(seat->cursor->xcursor_manager, scale)) {
+#else
 		if (wlr_xcursor_manager_load(seat->cursor->xcursor_manager, scale)) {
+#endif
 			wlr_log(WLR_ERROR, "Cannot load xcursor theme for output '%s' "
 				"with scale %f", output->wlr_output->name, scale);
 		}
@@ -1579,6 +1584,9 @@ void roots_seat_cycle_focus(struct roots_seat *seat) {
 }
 
 void roots_seat_begin_move(struct roots_seat *seat, struct roots_view *view) {
+	if (view->desktop->maximize)
+		return;
+
 	struct roots_cursor *cursor = seat->cursor;
 	cursor->mode = ROOTS_CURSOR_MOVE;
 	cursor->offs_x = cursor->cursor->x;
@@ -1598,6 +1606,9 @@ void roots_seat_begin_move(struct roots_seat *seat, struct roots_view *view) {
 
 void roots_seat_begin_resize(struct roots_seat *seat, struct roots_view *view,
 		uint32_t edges) {
+	if (view->desktop->maximize)
+		return;
+
 	struct roots_cursor *cursor = seat->cursor;
 	cursor->mode = ROOTS_CURSOR_RESIZE;
 	cursor->offs_x = cursor->cursor->x;

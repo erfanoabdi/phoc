@@ -15,15 +15,11 @@ sources = [
   'server.c',
   'switch.c',
   'text_input.c',
+  'utils.c',
   'view.c',
   'virtual.c',
   'xdg_shell.c',
-  'xdg_shell_v6.c',
 ]
-
-if have_xwayland
-  sources += 'xwayland.c'
-endif
 
 phoc_deps = [
   input,
@@ -38,6 +34,11 @@ phoc_deps = [
   server_protos,
   xkbcommon,
 ]
+
+if have_xwayland
+  sources += 'xwayland.c'
+  phoc_deps += dependency('xcb')
+endif
 
 phoc_lib = static_library(
   'phoc',

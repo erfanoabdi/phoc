@@ -29,9 +29,9 @@
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
-#include <wlr/types/wlr_xdg_shell_v6.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
+#include <wlr/version.h>
 #include "layers.h"
 #include "seat.h"
 #include "server.h"
@@ -105,12 +105,6 @@ static bool view_at(struct roots_view *view, double lx, double ly,
 	double _sx, _sy;
 	struct wlr_surface *_surface = NULL;
 	switch (view->type) {
-	case ROOTS_XDG_SHELL_V6_VIEW:;
-		struct roots_xdg_surface_v6 *xdg_surface_v6 =
-			roots_xdg_surface_v6_from_view(view);
-		_surface = wlr_xdg_surface_v6_surface_at(xdg_surface_v6->xdg_surface_v6,
-			view_sx, view_sy, &_sx, &_sy);
-		break;
 	case ROOTS_XDG_SHELL_VIEW:;
 		struct roots_xdg_surface *xdg_surface =
 			roots_xdg_surface_from_view(view);
@@ -267,32 +261,38 @@ struct wlr_surface *desktop_surface_at(PhocDesktop *desktop,
 	return NULL;
 }
 
-static void handle_layout_change(struct wl_listener *listener, void *data) {
-	PhocDesktop *desktop =
-		wl_container_of(listener, desktop, layout_change);
+static void
+handle_layout_change (struct wl_listener *listener, void *data)
+{
+  PhocDesktop *self;
+  struct wlr_output *center_output;
+  struct wlr_box *center_output_box;
+  double center_x, center_y;
+  struct roots_view *view;
+  struct roots_output *output;
 
-	struct wlr_output *center_output =
-		wlr_output_layout_get_center_output(desktop->layout);
-	if (center_output == NULL) {
-		return;
-	}
+  self = wl_container_of (listener, self, layout_change);
+  center_output = wlr_output_layout_get_center_output (self->layout);
+  if (center_output == NULL)
+    return;
 
-	struct wlr_box *center_output_box =
-		wlr_output_layout_get_box(desktop->layout, center_output);
-	double center_x = center_output_box->x + center_output_box->width/2;
-	double center_y = center_output_box->y + center_output_box->height/2;
+  center_output_box = wlr_output_layout_get_box (self->layout, center_output);
+  center_x = center_output_box->x + center_output_box->width / 2;
+  center_y = center_output_box->y + center_output_box->height / 2;
 
-	struct roots_view *view;
-	wl_list_for_each(view, &desktop->views, link) {
-		struct wlr_box box;
-		view_get_box(view, &box);
+  /* Make sure all views are on an existing output */
+  wl_list_for_each (view, &self->views, link) {
+    struct wlr_box box;
+    view_get_box (view, &box);
 
-		if (wlr_output_layout_intersects(desktop->layout, NULL, &box)) {
-			continue;
-		}
+    if (wlr_output_layout_intersects (self->layout, NULL, &box))
+      continue;
+    view_move (view, center_x - box.width / 2, center_y - box.height / 2);
+  }
 
-		view_move(view, center_x - box.width/2, center_y - box.height/2);
-	}
+  /* Damage all outputs since the move above damaged old layout space */
+  wl_list_for_each(output, &self->outputs, link)
+    output_damage_whole(output);
 }
 
 static void input_inhibit_activate(struct wl_listener *listener, void *data) {
@@ -403,6 +403,48 @@ scale_to_fit_changed_cb (PhocDesktop *self,
     phoc_desktop_set_scale_to_fit (self, max);
 }
 
+#ifdef PHOC_XWAYLAND
+static const char *atom_map[XWAYLAND_ATOM_LAST] = {
+	"_NET_WM_WINDOW_TYPE_NORMAL",
+	"_NET_WM_WINDOW_TYPE_DIALOG"
+};
+
+static
+void handle_xwayland_ready(struct wl_listener *listener, void *data) {
+  PhocDesktop *desktop = wl_container_of (
+        listener, desktop, xwayland_ready);
+  xcb_connection_t *xcb_conn = xcb_connect (NULL, NULL);
+
+  int err = xcb_connection_has_error (xcb_conn);
+  if (err) {
+    g_warning ("XCB connect failed: %d", err);
+    return;
+  }
+
+  xcb_intern_atom_cookie_t cookies[XWAYLAND_ATOM_LAST];
+
+  for (size_t i = 0; i < XWAYLAND_ATOM_LAST; i++)
+    cookies[i] = xcb_intern_atom (xcb_conn, 0, strlen (atom_map[i]), atom_map[i]);
+
+  for (size_t i = 0; i < XWAYLAND_ATOM_LAST; i++) {
+    xcb_generic_error_t *error = NULL;
+    xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply (xcb_conn, cookies[i], &error);
+
+    if (error) {
+      g_warning ("could not resolve atom %s, X11 error code %d",
+        atom_map[i], error->error_code);
+      free (error);
+    }
+
+    if (reply)
+      desktop->xwayland_atoms[i] = reply->atom;
+
+    free (reply);
+  }
+
+  xcb_disconnect (xcb_conn);
+}
+#endif
 
 static void
 phoc_desktop_constructed (GObject *object)
@@ -426,11 +468,6 @@ phoc_desktop_constructed (GObject *object)
 
   self->compositor = wlr_compositor_create(server->wl_display,
 					   server->renderer);
-
-  self->xdg_shell_v6 = wlr_xdg_shell_v6_create(server->wl_display);
-  wl_signal_add(&self->xdg_shell_v6->events.new_surface,
-		&self->xdg_shell_v6_surface);
-  self->xdg_shell_v6_surface.notify = handle_xdg_shell_v6_surface;
 
   self->xdg_shell = wlr_xdg_shell_create(server->wl_display);
   wl_signal_add(&self->xdg_shell->events.new_surface,
@@ -479,9 +516,17 @@ phoc_desktop_constructed (GObject *object)
 		  &self->xwayland_surface);
     self->xwayland_surface.notify = handle_xwayland_surface;
 
+    wl_signal_add(&self->xwayland->events.ready,
+		  &self->xwayland_ready);
+    self->xwayland_ready.notify = handle_xwayland_ready;
+
     setenv("DISPLAY", self->xwayland->display_name, true);
 
+#if (WLR_VERSION_MAJOR > 0 || WLR_VERSION_MINOR > 10)
+    if (!wlr_xcursor_manager_load(self->xcursor_manager, 1)) {
+#else
     if (wlr_xcursor_manager_load(self->xcursor_manager, 1)) {
+#endif
       wlr_log(WLR_ERROR, "Cannot load XWayland XCursor theme");
     }
     struct wlr_xcursor *xcursor = wlr_xcursor_manager_get_xcursor(
